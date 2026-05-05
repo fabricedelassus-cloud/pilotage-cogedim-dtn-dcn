@@ -58,6 +58,8 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;fon
 .live-dot{width:7px;height:7px;border-radius:50%;background:var(--border2);flex-shrink:0;transition:background .4s}
 .live-dot.on{background:var(--live);box-shadow:0 0 0 3px rgba(22,163,74,.15)}
 .live-dot.busy{background:var(--p2);animation:blink .5s infinite}
+.live-users-bar{display:flex;align-items:center;gap:5px;padding:0 12px;flex-wrap:wrap;flex-shrink:0}
+.live-user-pill{display:inline-flex;align-items:center;gap:4px;font-size:10px;font-weight:500;color:#fff;padding:2px 8px;border-radius:20px;transition:opacity .5s;white-space:nowrap}
 @keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
 .live-lbl{white-space:nowrap;font-size:11px}
 .user-badge{display:flex;align-items:center;gap:6px;padding:0 14px;border-left:1px solid var(--border);flex-shrink:0}
@@ -157,6 +159,11 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;fon
 .b-p1{background:rgba(214,48,48,.09);color:var(--p1)}.b-p2{background:rgba(184,114,0,.09);color:var(--p2)}.b-p3{background:rgba(10,122,80,.09);color:var(--p3)}.b-p4{background:rgba(122,138,154,.09);color:var(--p4)}
 .b-if{background:var(--bg4);color:var(--text3)}
 .by-lbl{font-size:9px;color:var(--text3);font-style:italic;margin-top:3px}
+.author-strip{display:flex;align-items:center;padding:4px 14px;font-size:10px;gap:0;border-top:1px solid var(--border);transition:opacity .3s}
+.live-users-bar{display:flex;align-items:center;gap:6px;padding:0 14px;border-left:1px solid var(--border);flex-shrink:0;min-width:0;overflow:hidden}
+.live-user-pill{display:flex;align-items:center;gap:4px;font-size:10px;font-weight:500;color:#fff;padding:2px 8px;border-radius:20px;transition:opacity .5s;white-space:nowrap}
+.live-user-dot{width:6px;height:6px;border-radius:50%;background:rgba(255,255,255,.5);flex-shrink:0}
+
 .card-acts{display:flex;gap:3px;flex-shrink:0;align-items:flex-start}
 .ibtn{background:none;border:1px solid transparent;border-radius:4px;width:20px;height:20px;cursor:pointer;font-size:10px;color:var(--text3);display:flex;align-items:center;justify-content:center;transition:all .15s}.ibtn:hover{background:var(--bg4);border-color:var(--border2);color:var(--text)}
 .ctoggle{font-size:9px;color:var(--text3);opacity:.35;transition:transform .2s,opacity .15s;cursor:pointer;padding:0 2px}.card:hover .ctoggle{opacity:.6}.card.open .ctoggle{transform:rotate(90deg);opacity:1}
@@ -250,10 +257,12 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;fon
     <div class="user-avatar" id="u-av"></div>
     <span class="user-name" id="u-nm"></span>
   </div>
+  <div class="live-users-bar" id="live-users-bar"></div>
   <div class="log-toggle" id="log-toggle" onclick="toggleLog()">
     📋 Journal
     <span class="log-notif" id="log-notif" style="display:none">0</span>
   </div>
+  <div class="live-users-bar" id="live-users-bar"></div>
 </div>
 
 <!-- TOOLBAR -->
@@ -461,16 +470,44 @@ function subscribeRealtime(){
     .subscribe(s=>{if(s==='SUBSCRIBED')setLive('on','En ligne — Temps réel actif');else if(s==='CHANNEL_ERROR')setLive('','Reconnexion…')});
 }
 function handleCardChange({eventType,new:nw,old:ol}){
+  // Ignore own changes already applied locally
+  const v=(nw&&nw.view)||(ol&&ol.view);if(!v)return;
+  if(nw&&nw.updated_by===currentUser&&eventType!=='DELETE')return;
   setLive('busy','Mise à jour…');setTimeout(()=>setLive('on','En ligne'),600);
-  const v=nw?.view||ol?.view;if(!v)return;
   const arr=v==='dtn'?dtnCards:dcnCards;
-  if(eventType==='DELETE'){const idx=arr.findIndex(c=>c.id===ol.id);if(idx>=0)arr.splice(idx,1);const el=document.getElementById('card-'+v+'-'+ol.id);if(el)el.remove();}
-  else{const idx=arr.findIndex(c=>c.id===nw.id);if(idx>=0)arr[idx]=nw;else arr.push(nw);
-    const container=document.getElementById('cards-'+v+'-'+nw.col_id);
-    if(container){renderCard(v,nw,container);applyFilterFor(v,curFilter);}
-    const el=document.getElementById('card-'+v+'-'+nw.id);if(el){el.classList.add('rt-flash');setTimeout(()=>el.classList.remove('rt-flash'),900);}
+  if(eventType==='DELETE'){
+    const idx=arr.findIndex(c=>c.id===ol.id);if(idx>=0)arr.splice(idx,1);
+    const el=document.getElementById('card-'+v+'-'+ol.id);if(el)el.remove();
+  }else{
+    const idx=arr.findIndex(c=>c.id===nw.id);
+    if(idx>=0)arr[idx]=nw;else arr.push(nw);
+    // Remove from wrong column if it moved
+    const existingEl=document.getElementById('card-'+v+'-'+nw.id);
+    const targetContainer=document.getElementById('cards-'+v+'-'+nw.col_id);
+    if(existingEl&&targetContainer&&existingEl.parentElement!==targetContainer)existingEl.remove();
+    if(targetContainer){renderCard(v,nw,targetContainer);applyFilterFor(v,curFilter);}
+    // Show author color on card
+    if(nw.updated_by){markCardAuthor(v,nw.id,nw.updated_by);}
   }
   updateProgress();setTimeout(()=>drawArrows(v),60);
+}
+// Show who is active in the live legend (fades after 30s)
+let liveLegendTimers={};
+function updateLiveLegend(userName){
+  const bar=document.getElementById('live-users-bar');
+  if(!bar)return;
+  const id='lu-'+userName.replace(/\s/g,'_');
+  let el=document.getElementById(id);
+  if(!el){
+    el=document.createElement('span');el.id=id;el.className='live-user-pill';
+    el.style.background=avatarColor(userName);
+    el.textContent=initials(userName)+' '+userName;
+    bar.appendChild(el);
+  }
+  // Reset fade timer
+  clearTimeout(liveLegendTimers[userName]);
+  el.style.opacity='1';
+  liveLegendTimers[userName]=setTimeout(()=>{el.style.opacity='0';setTimeout(()=>el.remove(),500)},30000);
 }
 function handleNewLog({new:log}){
   if(!log)return;
@@ -547,7 +584,8 @@ function renderCard(v,card,container){
   const cards=v==='dtn'?dtnCards:dcnCards;
   const actHTML=(Array.isArray(card.actions)&&card.actions.length)?`<div class="ablock"><div class="albl">Actions</div>${card.actions.map(a=>`<div class="aitem"><span class="aarrow">›</span><span>${a}</span></div>`).join('')}</div>`:'';
   const porteurHTML=card.porteur?`<div class="porteur-row">Porteur : <span class="porteur-val">${card.porteur}</span></div>`:'';
-  const byHTML=card.updated_by?`<div class="by-lbl">Modifié par ${card.updated_by}</div>`:'';
+  const byColor=card.updated_by?avatarColor(card.updated_by):'var(--text3)';
+  const byHTML=card.updated_by?`<div class="author-strip" style="border-top:2px solid ${byColor};background:${byColor}18"><span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:${byColor};margin-right:5px;vertical-align:middle;flex-shrink:0"></span><span style="color:${byColor};font-weight:500">${initials(card.updated_by)}</span><span style="color:var(--text3)"> ${card.updated_by}</span></div>`:'';
   const unlockPills=unlocks.map(u=>{const t=cards.find(c=>c.id===u);return t?`<span class="dep-pill" onclick="jumpToCard('${v}','${u}');event.stopPropagation()">${t.title}</span><button class="dep-rm" onclick="removeDep('${v}','${card.id}','${u}');event.stopPropagation()" title="Retirer">✕</button>`:''}).join('');
   const prereqPills=prereqs.map(p=>{const t=cards.find(c=>c.id===p);return t?`<span class="dep-pill" onclick="jumpToCard('${v}','${p}');event.stopPropagation()">${t.title}</span>`:''}).join('');
   const depHTML=`<div class="dep-section"><div class="dep-row"><span style="flex-shrink:0;min-width:68px;color:var(--text3)">Débloque →</span><div class="dep-pills">${unlockPills}</div><button class="dep-add" onclick="openDepPicker('${v}','${card.id}',this);event.stopPropagation()">+ lier</button></div>${prereqs.length?`<div class="dep-row"><span style="flex-shrink:0;min-width:68px;color:var(--text3)">Dépend de ←</span><div class="dep-pills">${prereqPills}</div></div>`:''}</div>`;
@@ -564,7 +602,6 @@ function renderCard(v,card,container){
       <span class="badge b-${card.prio||'p2'}">${prioLabels[card.prio||'p2']||''}</span>
       ${card.interfiliere?'<span class="badge b-if">interfilière</span>':''}
     </div>
-    ${byHTML}
   </div>
   <div class="card-acts">
     <button class="ibtn" onclick="openEditModal('${v}','${card.id}');event.stopPropagation()" title="Modifier">✏</button>
@@ -576,7 +613,8 @@ function renderCard(v,card,container){
   <p class="cdesc">${card.detail||''}</p>
   ${actHTML}
   ${depHTML}
-</div>`;
+</div>
+${byHTML}`;
   container.appendChild(el);
   if(card.done){document.getElementById('chk-'+v+'-'+card.id)?.classList.add('checked');el.classList.add('done-card');}
 }
@@ -702,6 +740,22 @@ function closeDepPicker(){document.getElementById('dpp').classList.remove('vis')
 function closePickerOut(e){if(!document.getElementById('dpp').contains(e.target))closeDepPicker()}
 
 // ── MODAL ──
+// ── AUTHOR INDICATOR ──
+function markCardAuthor(v,cardId,userName){
+  const el=document.getElementById('card-'+v+'-'+cardId);if(!el)return;
+  const col=avatarColor(userName);
+  let strip=el.querySelector('.author-strip');
+  if(!strip){
+    strip=document.createElement('div');strip.className='author-strip';
+    strip.style.borderTop='1px solid var(--border)';
+    el.appendChild(strip);
+  }
+  strip.style.background=col+'18';
+  strip.style.borderTopColor=col;
+  strip.innerHTML=`<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:${col};margin-right:5px;flex-shrink:0"></span><span style="color:${col};font-weight:600;font-size:10px">${initials(userName)}</span><span style="color:var(--text3);font-size:10px"> ${userName}</span>`;
+  updateLiveLegend(userName);
+}
+
 function buildColSelect(v,selectedCId){const cols=v==='dtn'?COLS_DTN:COLS_DCN;return cols.map(c=>`<option value="${c.id}"${c.id===selectedCId?' selected':''}>${c.sub} — ${c.title}</option>`).join('')}
 function openEditModal(v,id){
   editingId=id;editingView=v;addingCId=null;const cards=v==='dtn'?dtnCards:dcnCards;const card=cards.find(c=>c.id===id);if(!card)return;
@@ -724,10 +778,17 @@ async function saveCard(){
   setLive('busy','Sauvegarde…');closeModal();
   if(editingId){
     const cards=v==='dtn'?dtnCards:dcnCards;const card=cards.find(c=>c.id===editingId);
+    const oldColId=card?.col_id;
     if(card){data.unlocks=card.unlocks||[];Object.assign(card,data);}
     await db.from('cards').update(data).eq('id',editingId).eq('view',v);
     await logActivity('update',editingId,title,v,'Contenu mis à jour');
-    buildBoard(v);
+    const targetContainer=document.getElementById('cards-'+v+'-'+newColId);
+    if(oldColId && oldColId!==newColId){
+      const oldEl=document.getElementById('card-'+v+'-'+editingId);if(oldEl)oldEl.remove();
+    }
+    if(targetContainer){renderCard(v,card||data,targetContainer);applyFilterFor(v,curFilter);}
+    markCardAuthor(v,editingId,currentUser);
+    updateProgress();setTimeout(()=>drawArrows(v),60);
   }else{
     data.id=uid();data.unlocks=[];data.done=false;const cards=v==='dtn'?dtnCards:dcnCards;cards.push(data);
     await db.from('cards').insert(data);
